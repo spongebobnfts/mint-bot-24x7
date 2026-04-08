@@ -4,116 +4,91 @@ const axios = require('axios');
 const cron = require('node-cron');
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
-console.log('🤖 Bot token:', token ? 'LOADED' : 'MISSING');
+const PORT = process.env.PORT || 3000;
+const url = process.env.RAILWAY_URL || `https://your-app.railway.app`;
 
-// Initialize bot
-const bot = new TelegramBot(token, { polling: true });
+// Webhook bot (Railway friendly)
+const bot = new TelegramBot(token, { webHook: true });
+
+// Railway URL set (important!)
+bot.setWebHook(`${url}/bot${token}`).then(() => {
+    console.log('✅ Webhook set!');
+}).catch(err => {
+    console.log('Webhook error:', err.message);
+});
+
 let tracks = [];
 
-// Log all messages
-bot.on('message', (msg) => {
-    console.log(`📨 Message from ${msg.chat.username}: ${msg.text}`);
+// Express server for webhook
+const express = require('express');
+const app = express();
+app.use(express.json());
+
+app.get('/', (req, res) => res.send('Mint Bot LIVE!'));
+
+app.post(`/bot${token}`, (req, res) => {
+    bot.processUpdate(req.body);
+    res.sendStatus(200);
 });
 
-// /start - IMMEDIATE REPLY
+app.listen(PORT, () => {
+    console.log(`🚀 Bot live on port ${PORT}`);
+});
+
+// Commands
 bot.onText(/\/start/, (msg) => {
-    console.log('✅ /start received!');
-    bot.sendMessage(msg.chat.id, 
-        `🎉 **BOT LIVE!** 🎉\n\n` +
-        `🚀 24/7 Mint Tracker\n` +
-        `📝 /track chain:eth contract:0x123 supply:300 channel:@yourchannel\n` +
-        `📋 /list\n` +
-        `📊 /status`
-    );
+    console.log('✅ /start from:', msg.chat.username);
+    bot.sendMessage(msg.chat.id, '🎉 **24/7 WEBHOOK BOT LIVE!**\n\n/track chain:eth contract:0x123 supply:300 channel:@yourchannel');
 });
 
-// /track command
 bot.onText(/\/track (.+)/, (msg, match) => {
-    const chatId = msg.chat.id;
-    console.log('📝 Track command:', match[1]);
-    
     const params = match[1].toLowerCase();
     const contract = params.match(/contract:([0-9a-f]{40,})/i)?.[1];
     const supply = parseInt(params.match(/supply:(\d+)/)?.[1] || 0);
-    const channel = params.match(/channel:@?([a-z0-9_]+)/i)?.[1] ? '@' + params.match(/channel:@?([a-z0-9_]+)/i)[1] : '@sagar';
     
     if (!contract || !supply) {
-        bot.sendMessage(chatId, `❌ Wrong format!\n✅ /track chain:eth contract:0xbc4ca0eda7647a8ab7c2061c2e118a18a936f13d supply:10 channel:@sagar`);
-        return;
+        return bot.sendMessage(msg.chat.id, '❌ /track chain:eth contract:0xbc4ca0eda7647a8ab7c2061c2e118a18a936f13d supply:10 channel:@sagar');
     }
     
     const track = {
         contract: contract.toLowerCase(),
-        supply: supply,
-        channel: channel,
+        supply,
+        channel: '@sagar',
         current: 0,
         notified: false
     };
     
     tracks.push(track);
-    bot.sendMessage(chatId, 
-        `✅ **TRACKING ACTIVE!**\n\n` +
-        `📜 \`${track.contract.slice(0,10)}...\`\n` +
-        `🎯 Target: ${track.supply}\n` +
-        `📢 ${track.channel}\n` +
-        `⏱️ Live monitoring...`
-    );
-    console.log('➕ Added track:', track.contract.slice(0,10));
+    bot.sendMessage(msg.chat.id, `✅ Tracking \`${track.contract.slice(0,10)}...\` → ${track.supply} supply`);
 });
 
-// /list
 bot.onText(/\/list/, (msg) => {
-    if (tracks.length === 0) {
-        bot.sendMessage(msg.chat.id, '📭 No active tracks');
-        return;
-    }
-    const list = tracks.map((t, i) => `${i+1}. \`${t.contract.slice(0,10)}...\` ${t.current}/${t.supply}`).join('\n');
-    bot.sendMessage(msg.chat.id, `📋 **Active Tracks (${tracks.length}):\n\n${list}`);
+    const list = tracks.map(t => `\`${t.contract.slice(0,10)}...\` ${t.current}/${t.supply}`).join('\n') || 'No tracks';
+    bot.sendMessage(msg.chat.id, `📋 Tracks:\n${list}`);
 });
 
-// /status
 bot.onText(/\/status/, (msg) => {
-    bot.sendMessage(msg.chat.id, 
-        `✅ **Bot Status**\n` +
-        `⏰ 24/7 LIVE\n` +
-        `📊 Tracks: ${tracks.length}\n` +
-        `🔄 Auto-check: 30s`
-    );
+    bot.sendMessage(msg.chat.id, `✅ **Railway LIVE**\nTracks: ${tracks.length}`);
 });
 
-// Mint monitoring
+// Mint checker
 async function checkMints() {
-    console.log(`🔍 Scanning ${tracks.length} contracts...`);
     for (let track of tracks) {
         try {
-            const response = await axios.get(
-                `https://api.opensea.io/api/v1/events?asset_contract_address=${track.contract}&event_type=successful&limit=10`,
-                {
-                    headers: { 
-                        'X-API-KEY': process.env.OPENSEA_API_KEY || 'test',
-                        'User-Agent': 'MintBot/1.0'
-                    },
-                    timeout: 8000
-                }
+            const res = await axios.get(
+                `https://api.opensea.io/api/v1/events?asset_contract_address=${track.contract}&limit=5`,
+                { headers: { 'X-API-KEY': process.env.OPENSEA_API_KEY }, timeout: 5000 }
             );
+            track.current = res.data.asset_events?.length || 0;
             
-            const mintCount = response.data.asset_events?.length || 0;
-            track.current = mintCount;
-            
-            console.log(`📊 ${track.contract.slice(0,10)}: ${mintCount}/${track.supply}`);
-            
-            if (mintCount >= track.supply && !track.notified) {
-                const alert = `🚨 **MINT ALERT!** 🚨\n\n📜 \`${track.contract}\`\n✅ ${mintCount}/${track.supply}\n\n⚡ **MINT NOW!!**`;
-                bot.sendMessage(track.channel, alert);
+            if (track.current >= track.supply && !track.notified) {
+                bot.sendMessage(track.channel, `🚨 MINT! ${track.contract.slice(0,10)} ${track.current}/${track.supply}`);
                 track.notified = true;
             }
-        } catch (error) {
-            console.log(`⚠️ ${track.contract.slice(0,10)}: API error`);
-        }
+        } catch (e) {}
     }
 }
 
-// Auto check every 30 seconds
 cron.schedule('*/30 * * * * *', checkMints);
 
-console.log('🚀 Mint Bot 24/7 LIVE! Send /start');
+console.log('🚀 Webhook Bot Ready!');
