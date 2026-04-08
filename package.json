@@ -1,6 +1,6 @@
 {
-  "name": "mint-bot",
-  "version": "1.0.0",
+  "name": "mint-bot-24x7",
+  "version": "2.0.0",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
