@@ -3,77 +3,117 @@ const TelegramBot = require('node-telegram-bot-api');
 const axios = require('axios');
 const cron = require('node-cron');
 
-// Fix: Webhook instead of polling for Railway
 const token = process.env.TELEGRAM_BOT_TOKEN;
-const bot = new TelegramBot(token);
+console.log('🤖 Bot token:', token ? 'LOADED' : 'MISSING');
 
-// Test token
-console.log('🤖 Token loaded:', token ? '✅ YES' : '❌ NO');
-
+// Initialize bot
+const bot = new TelegramBot(token, { polling: true });
 let tracks = [];
 
-// Error handling
-bot.on('polling_error', (error) => {
-    console.log('Polling error (normal on Railway):', error.code);
+// Log all messages
+bot.on('message', (msg) => {
+    console.log(`📨 Message from ${msg.chat.username}: ${msg.text}`);
 });
 
-// Commands
+// /start - IMMEDIATE REPLY
 bot.onText(/\/start/, (msg) => {
-    console.log('✅ /start received from:', msg.chat.username);
-    bot.sendMessage(msg.chat.id, '🚀 **24/7 Mint Bot LIVE!**\n\n/track chain:eth contract:0x123 supply:300 channel:@yourchannel');
+    console.log('✅ /start received!');
+    bot.sendMessage(msg.chat.id, 
+        `🎉 **BOT LIVE!** 🎉\n\n` +
+        `🚀 24/7 Mint Tracker\n` +
+        `📝 /track chain:eth contract:0x123 supply:300 channel:@yourchannel\n` +
+        `📋 /list\n` +
+        `📊 /status`
+    );
 });
 
+// /track command
 bot.onText(/\/track (.+)/, (msg, match) => {
     const chatId = msg.chat.id;
+    console.log('📝 Track command:', match[1]);
+    
     const params = match[1].toLowerCase();
+    const contract = params.match(/contract:([0-9a-f]{40,})/i)?.[1];
+    const supply = parseInt(params.match(/supply:(\d+)/)?.[1] || 0);
+    const channel = params.match(/channel:@?([a-z0-9_]+)/i)?.[1] ? '@' + params.match(/channel:@?([a-z0-9_]+)/i)[1] : '@sagar';
     
-    const contractMatch = params.match(/contract:([0-9a-f]{40,})/i);
-    const supplyMatch = params.match(/supply:(\d+)/);
-    const channelMatch = params.match(/channel:@?([a-z0-9_]+)/i);
-    
-    if (!contractMatch || !supplyMatch) {
-        return bot.sendMessage(chatId, '❌ Format: /track chain:eth contract:0x123... supply:300 channel:@yourname');
+    if (!contract || !supply) {
+        bot.sendMessage(chatId, `❌ Wrong format!\n✅ /track chain:eth contract:0xbc4ca0eda7647a8ab7c2061c2e118a18a936f13d supply:10 channel:@sagar`);
+        return;
     }
     
     const track = {
-        contract: contractMatch[1].toLowerCase(),
-        supply: parseInt(supplyMatch[1]),
-        channel: '@' + (channelMatch ? channelMatch[1] : 'test'),
+        contract: contract.toLowerCase(),
+        supply: supply,
+        channel: channel,
         current: 0,
         notified: false
     };
     
     tracks.push(track);
-    bot.sendMessage(chatId, `✅ Tracking \`${track.contract.slice(0,10)}...\` → ${track.supply}`);
-    console.log('➕ New track:', track.contract.slice(0,10));
+    bot.sendMessage(chatId, 
+        `✅ **TRACKING ACTIVE!**\n\n` +
+        `📜 \`${track.contract.slice(0,10)}...\`\n` +
+        `🎯 Target: ${track.supply}\n` +
+        `📢 ${track.channel}\n` +
+        `⏱️ Live monitoring...`
+    );
+    console.log('➕ Added track:', track.contract.slice(0,10));
 });
 
+// /list
 bot.onText(/\/list/, (msg) => {
-    if (tracks.length === 0) return bot.sendMessage(msg.chat.id, '📭 No tracks');
-    const list = tracks.map(t => `\`${t.contract.slice(0,10)}...\` ${t.current}/${t.supply}`).join('\n');
-    bot.sendMessage(msg.chat.id, `📋 **${tracks.length} tracks:**\n${list}`);
+    if (tracks.length === 0) {
+        bot.sendMessage(msg.chat.id, '📭 No active tracks');
+        return;
+    }
+    const list = tracks.map((t, i) => `${i+1}. \`${t.contract.slice(0,10)}...\` ${t.current}/${t.supply}`).join('\n');
+    bot.sendMessage(msg.chat.id, `📋 **Active Tracks (${tracks.length}):\n\n${list}`);
 });
 
-// Mint checker (safe)
+// /status
+bot.onText(/\/status/, (msg) => {
+    bot.sendMessage(msg.chat.id, 
+        `✅ **Bot Status**\n` +
+        `⏰ 24/7 LIVE\n` +
+        `📊 Tracks: ${tracks.length}\n` +
+        `🔄 Auto-check: 30s`
+    );
+});
+
+// Mint monitoring
 async function checkMints() {
-    console.log(`🔍 Checking ${tracks.length} tracks...`);
+    console.log(`🔍 Scanning ${tracks.length} contracts...`);
     for (let track of tracks) {
         try {
-            const res = await axios.get(
-                `https://api.opensea.io/api/v1/events?asset_contract_address=${track.contract}&limit=5`,
-                { headers: { 'X-API-KEY': process.env.OPENSEA_API_KEY }, timeout: 5000 }
+            const response = await axios.get(
+                `https://api.opensea.io/api/v1/events?asset_contract_address=${track.contract}&event_type=successful&limit=10`,
+                {
+                    headers: { 
+                        'X-API-KEY': process.env.OPENSEA_API_KEY || 'test',
+                        'User-Agent': 'MintBot/1.0'
+                    },
+                    timeout: 8000
+                }
             );
-            track.current = res.data.asset_events?.length || 0;
             
-            if (track.current >= track.supply && !track.notified) {
-                bot.sendMessage(track.channel, `🚨 **MINT ALERT!** \`${track.contract}\` ${track.current}/${track.supply}`);
+            const mintCount = response.data.asset_events?.length || 0;
+            track.current = mintCount;
+            
+            console.log(`📊 ${track.contract.slice(0,10)}: ${mintCount}/${track.supply}`);
+            
+            if (mintCount >= track.supply && !track.notified) {
+                const alert = `🚨 **MINT ALERT!** 🚨\n\n📜 \`${track.contract}\`\n✅ ${mintCount}/${track.supply}\n\n⚡ **MINT NOW!!**`;
+                bot.sendMessage(track.channel, alert);
                 track.notified = true;
             }
-        } catch (e) {
-            // Silent fail
+        } catch (error) {
+            console.log(`⚠️ ${track.contract.slice(0,10)}: API error`);
         }
     }
 }
 
+// Auto check every 30 seconds
 cron.schedule('*/30 * * * * *', checkMints);
-console.log('🚀 Bot ready! Send /start to test');
+
+console.log('🚀 Mint Bot 24/7 LIVE! Send /start');
